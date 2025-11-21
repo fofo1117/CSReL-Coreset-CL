@@ -163,6 +163,15 @@ def _compute_adversarial_losses(model, inputs, labels, loss_fn, attack_state, at
 
 def select_by_loss_diff(ref_loss_dic, rand_data, model, incremental_size, transforms, on_cuda, loss_params,
                         class_sizes=None, attack_params=None):
+    """Select samples whose loss increases the most under clean or adversarial views.
+
+    中文说明：在默认情况下，函数会比较样本当前的预测损失与历史基准损失，
+    按照增长幅度排序挑选最容易遗忘的样本；当 `attack_params` 被提供时，
+    会先训练一个小型特征空间攻击器在模型最后一层表征上制造有界扰动，
+    计算攻击后损失与干净损失的差值，并以该“脆弱度”作为排序依据。换言之，
+    在有攻击的模式下，越是对特征扰动敏感、攻击后损失上升越大的样本就越优先被选入核心集，
+    以便后续增量学习时重点巩固这些易受干扰的知识点。
+    """
     status = model.training
     model.eval()
     if on_cuda:
