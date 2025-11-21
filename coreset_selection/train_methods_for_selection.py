@@ -1,16 +1,17 @@
 # -*-coding:utf8-*-
 
-import torch
-import numpy as np
-import os
 import copy
+import os
 import pickle
+
+import numpy as np
+import torch
 
 from functions import loss_functions
 
 
 def train_model(local_path, model, train_loader, train_params, eval_loader, eval_mode, verbose=True,
-                load_best=False, eval_steps=10):
+                load_best=False, eval_steps=10, sample_loss_recorder=None):
     if 'log_steps' in train_params:
         log_steps = train_params['log_steps']
     else:
@@ -18,11 +19,12 @@ def train_model(local_path, model, train_loader, train_params, eval_loader, eval
     if 'loss_params' in train_params:
         loss_fn = loss_functions.CompliedLoss(
             ce_factor=train_params['loss_params']['ce_factor'],
-            mse_factor=train_params['loss_params']['mse_factor']
+            mse_factor=train_params['loss_params']['mse_factor'],
+            reduction='none'
         )
         loss_params = train_params['loss_params']
     else:
-        loss_fn = torch.nn.CrossEntropyLoss()
+        loss_fn = torch.nn.CrossEntropyLoss(reduction='none')
         loss_params = None
     if train_params['use_cuda']:
         model = model.cuda()
@@ -41,6 +43,7 @@ def train_model(local_path, model, train_loader, train_params, eval_loader, eval
         if len(data) == 2:
             sp, lab = data
             ref_logits = None
+            d_id = None
         elif len(data) == 4:
             d_id, sp, lab, ref_logits = data
         else:
@@ -53,9 +56,23 @@ def train_model(local_path, model, train_loader, train_params, eval_loader, eval
                 ref_logits = ref_logits.cuda()
         out = model(sp)
         if 'loss_params' in train_params:
-            loss = loss_fn(x=out, y=lab, logits=ref_logits)
+            loss_per_sample = loss_fn(x=out, y=lab, logits=ref_logits)
         else:
-            loss = loss_fn(out, lab)
+            loss_per_sample = loss_fn(out, lab)
+        loss = loss_per_sample.mean()
+        if sample_loss_recorder is not None and d_id is not None:
+            if isinstance(d_id, torch.Tensor):
+                d_id_list = d_id.detach().cpu().numpy().tolist()
+            elif isinstance(d_id, (list, tuple)):
+                d_id_list = list(d_id)
+            else:
+                d_id_list = [d_id]
+            if isinstance(loss_per_sample, torch.Tensor):
+                loss_values = loss_per_sample.detach().cpu().numpy()
+            else:
+                loss_values = loss_per_sample
+            for idx, lval in zip(d_id_list, np.atleast_1d(loss_values)):
+                sample_loss_recorder[int(idx)] = float(lval)
         opt.zero_grad()
         loss.backward()
         opt.step()

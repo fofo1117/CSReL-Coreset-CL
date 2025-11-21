@@ -18,7 +18,8 @@ from functions import train_methods
 class RhoSelectionAgent(object):
     def __init__(self, local_path, transforms, init_size, selection_steps, cur_train_lr, cur_train_steps, use_cuda,
                  eval_mode, early_stop, eval_steps, model_params, ref_train_params, seed, ref_model=None,
-                 class_balance=True, only_new_data=True, loss_params=None, save_checkpoint=False):
+                 class_balance=True, only_new_data=True, loss_params=None, save_checkpoint=False,
+                 attack_params=None):
         # all related setting
         self.local_path = local_path
         if not os.path.exists(self.local_path):
@@ -39,6 +40,7 @@ class RhoSelectionAgent(object):
         self.model_params = model_params
         self.seed = seed
         self.save_checkpoint = save_checkpoint
+        self.attack_params = attack_params
         # make train_params
         if loss_params is None:
             loss_params = {
@@ -208,10 +210,24 @@ class RhoSelectionAgent(object):
         else:
             full_train_loader = None
             full_data_file = ''
+        attack_train_loader = None
+        attack_data_file = ''
+        # 缓存主训练过程中每个样本的干净损失，供后续只计算一次攻击损失即可评估脆弱度。
+        clean_loss_recorder = {}
+        if self.attack_params is not None:
+            attack_train_loader, attack_data_file = self.make_data_loader(
+                x=x,
+                y=y,
+                batch_size=self.train_params['batch_size'],
+                fname='attack_full.pkl',
+                id_list=id_list,
+                id2logit=id2logit
+            )
         if id_list is None:
             full_ids = list(range(x.shape[0]))
         else:
             full_ids = id_list
+        attack_state = None
         # make initial set
         if self.init_size > 0:
             if bool(self.class_balance):
@@ -258,9 +274,24 @@ class RhoSelectionAgent(object):
                 eval_mode=self.eval_mode,
                 verbose=verbose,
                 load_best=False,
-                eval_steps=self.eval_steps
+                eval_steps=self.eval_steps,
+                sample_loss_recorder=clean_loss_recorder
             )
             init_model = result
+            attack_state = coreset_selection_functions.ensure_attack_state(
+                model=init_model,
+                attack_params=self.attack_params,
+                attack_state=attack_state
+            )
+            attack_state = coreset_selection_functions.train_feature_attacker_on_loader(
+                model=init_model,
+                attack_loader=attack_train_loader,
+                loss_params=self.train_params['loss_params'],
+                attack_params=self.attack_params,
+                attack_state=attack_state,
+                on_cuda=self.train_params['use_cuda'],
+                clean_loss_recorder=clean_loss_recorder
+            )
         while len(all_selected_ids) < select_size:
             id_pool = set()
             for d_id in full_ids:
@@ -284,6 +315,11 @@ class RhoSelectionAgent(object):
                 id_list=id_list,
                 id2logit=id2logit
             )
+            attack_state = coreset_selection_functions.ensure_attack_state(
+                model=init_model,
+                attack_params=self.attack_params,
+                attack_state=attack_state
+            )
             selected_data, _ = coreset_selection_functions.select_by_loss_diff(
                 ref_loss_dic=ref_loss_dic,
                 rand_data=rand_data,
@@ -292,7 +328,10 @@ class RhoSelectionAgent(object):
                 transforms=self.transforms,
                 on_cuda=self.train_params['use_cuda'],
                 loss_params=self.train_params['loss_params'],
-                class_sizes=class_sizes
+                class_sizes=class_sizes,
+                attack_params=self.attack_params,
+                attack_state=attack_state,
+                train_loss_cache=clean_loss_recorder
             )
             flg_add = False
             for di in selected_data:
@@ -323,13 +362,30 @@ class RhoSelectionAgent(object):
                 eval_mode=self.eval_mode,
                 verbose=verbose,
                 load_best=False,
-                eval_steps=self.eval_steps
+                eval_steps=self.eval_steps,
+                sample_loss_recorder=clean_loss_recorder
             )
             trained_model = result
             init_model = trained_model
+            attack_state = coreset_selection_functions.ensure_attack_state(
+                model=init_model,
+                attack_params=self.attack_params,
+                attack_state=attack_state
+            )
+            attack_state = coreset_selection_functions.train_feature_attacker_on_loader(
+                model=init_model,
+                attack_loader=attack_train_loader,
+                loss_params=self.train_params['loss_params'],
+                attack_params=self.attack_params,
+                attack_state=attack_state,
+                on_cuda=self.train_params['use_cuda'],
+                clean_loss_recorder=clean_loss_recorder
+            )
             print('finish selecting samples:', len(all_selected_ids))
         if len(full_data_file) > 0:
             os.remove(full_data_file)
+        if len(attack_data_file) > 0:
+            os.remove(attack_data_file)
         # get selected data
         selected_data = []
         with open(self.cur_train_file, 'rb') as fr:
